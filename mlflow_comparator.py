@@ -135,21 +135,19 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # Now start the MLflow run and log everything
     summary_name = f"summary-{datetime.now().strftime('%Y-%m-%d-%H%M')}"
     with mlflow.start_run(experiment_id=exp_id, run_name=summary_name) as run:
-        # Params
         mlflow.log_param("num_pairs", len(pairs_df))
         mlflow.log_param("summary_date", datetime.now().isoformat())
 
-        # Metrics (aggregates)
         for k, v in stats.items():
-            if v is not None:  # Avoid NaN
+            if v is not None and not pd.isna(v):  # Extra guard against NaN
                 mlflow.log_metric(k, float(v))
 
-        # Tables
-        mlflow.log_table(pairs_df.to_dict(orient="records"), "pairs_summary.json")
-        mlflow.log_table(pairs_df.describe().to_dict(orient="records"), "aggregate_stats.json")
+        # Fixed: Pass DataFrames directly
+        mlflow.log_table(pairs_df, "pairs_summary.json")
+        mlflow.log_table(pairs_df.describe(), "aggregate_stats.json")
 
-        # Artifacts - now real file paths!
-        mlflow.log_artifact(scatter_path)  # Filename becomes artifact name
+        # Artifacts (unchanged)
+        mlflow.log_artifact(scatter_path)
         mlflow.log_artifact(hist_path)
         mlflow.log_artifact(box_path)
 
