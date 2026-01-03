@@ -1,4 +1,5 @@
 import mlflow
+import tempfile
 from mlflow.tracking import MlflowClient
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -115,23 +116,42 @@ ax3.set_title("Top Confidence Distribution")
 box_buf = fig_to_buf(fig3)
 plt.close(fig3)
 
-# Log to new summary run
-summary_name = f"summary-{datetime.now().isoformat()}"
-with mlflow.start_run(experiment_id=exp_id, run_name=summary_name) as run:
-    # Params
-    mlflow.log_param("num_pairs", len(pairs_df))
-    
-    # Metrics
-    for k, v in stats.items():
-        mlflow.log_metric(k, v)
-    
-    # Tables (JSON for UI)
-    mlflow.log_table(pairs_df, "pairs_summary.json")
-    mlflow.log_table(pairs_df.describe().reset_index(), "aggregate_stats.json")
-    
-    # Charts as artifacts
-    mlflow.log_artifact(scatter_buf, "scatter_detections.png")
-    mlflow.log_artifact(hist_buf, "hist_conf_diff.png")
-    mlflow.log_artifact(box_buf, "boxplot_conf.png")
+# Use a temporary directory to save charts as real files
+with tempfile.TemporaryDirectory() as tmpdir:
+    scatter_path = os.path.join(tmpdir, "scatter_detections.png")
+    hist_path = os.path.join(tmpdir, "hist_conf_diff.png")
+    box_path = os.path.join(tmpdir, "boxplot_conf.png")
 
-print(f"Created summary run '{summary_name}' with {len(pairs_df)} pairs analyzed.")
+    fig1.savefig(scatter_path, bbox_inches='tight', dpi=150)
+    plt.close(fig1)
+
+    fig2.savefig(hist_path, bbox_inches='tight', dpi=150)
+    plt.close(fig2)
+
+    fig3.savefig(box_path, bbox_inches='tight', dpi=150)
+    plt.close(fig3)
+
+    # Now start the MLflow run and log everything
+    summary_name = f"summary-{datetime.now().strftime('%Y-%m-%d-%H%M')}"
+    with mlflow.start_run(experiment_id=exp_id, run_name=summary_name) as run:
+        # Params
+        mlflow.log_param("num_pairs", len(pairs_df))
+        mlflow.log_param("summary_date", datetime.now().isoformat())
+
+        # Metrics (aggregates)
+        for k, v in stats.items():
+            if v is not None:  # Avoid NaN
+                mlflow.log_metric(k, float(v))
+
+        # Tables
+        mlflow.log_table(pairs_df.to_dict(orient="records"), "pairs_summary.json")
+        mlflow.log_table(pairs_df.describe().to_dict(orient="records"), "aggregate_stats.json")
+
+        # Artifacts - now real file paths!
+        mlflow.log_artifact(scatter_path)  # Filename becomes artifact name
+        mlflow.log_artifact(hist_path)
+        mlflow.log_artifact(box_path)
+
+        print(f"Logged summary run '{summary_name}' with {len(pairs_df)} pairs and 3 charts.")
+
+print("Comparator run complete.")
