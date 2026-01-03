@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mlflow-comparator
+  namespace: mlflow
+spec:
+  schedule: "0 12 * * *"  # Daily at noon UTC (0 12 is 12:00; adjust for timezone, e.g., "0 17 * * *" for noon PST)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: comparator
+            image: ghcr.io/dcaulton/mlflow-comparator:latest
+            resources:
+              limits:
+                cpu: "500m"
+                memory: "512Mi"
+          restartPolicy: Never
+      backoffLimit: 2
