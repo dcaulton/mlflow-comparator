@@ -47,110 +47,105 @@ df = pd.DataFrame(data)
 
 # Group and filter complete pairs
 grouped = df.groupby("run_name")
-complete_pairs = [ (name, group) for name, group in grouped if set(group["detector"]) == {"yolo", "vit"} and len(group) == 2 ]
 
-if not complete_pairs:
-    print("No complete pairs found. Exiting.")
+# Collect multi-detector groups (no "complete_pairs" filter—handle all)
+multi_groups = []
+for name, group in grouped:
+    detectors = sorted(group["detector"].unique())
+    if len(detectors) >= 2:  # Min for comparison; adjust as needed
+        multi_groups.append((name, group, detectors))
+
+if not multi_groups:
+    print("No multi-detector groups found. Exiting.")
     exit(0)
 
-# Build pairs_df
-pairs_data = []
-for name, group in complete_pairs:
-    yolo = group[group["detector"] == "yolo"].iloc[0]
-    vit = group[group["detector"] == "vit"].iloc[0]
-    pairs_data.append({
-        "run_name": name,
-        "yolo_dets": yolo["num_detections"],
-        "vit_dets": vit["num_detections"],
-        "yolo_conf": yolo["top_confidence"],
-        "vit_conf": vit["top_confidence"],
-        "yolo_time": yolo["inference_time"],
-        "vit_time": vit["inference_time"],
-    })
-pairs_df = pd.DataFrame(pairs_data)
+# Build expanded pairs_df → now "multi_df" with pivoted metrics
+# Pivot for easy diffs (columns like inference_time_yolo, _vit, _newyolo)
+pivot_metrics = ["inference_time", "num_detections", "top_confidence"]
+multi_df = pd.DataFrame()  # Aggregate across groups
+for name, group, detectors in multi_groups:
+    pivot = group.pivot(index="run_name", columns="detector", values=pivot_metrics)
+    pivot["run_name"] = name
+    multi_df = pd.concat([multi_df, pivot])
 
-# Compute aggregates
-pairs_df["conf_diff"] = pairs_df["vit_conf"] - pairs_df["yolo_conf"]
-pairs_df["dets_diff"] = pairs_df["vit_dets"] - pairs_df["yolo_dets"]
-pairs_df["time_diff"] = pairs_df["vit_time"] - pairs_df["yolo_time"]
+# Compute diffs relative to a baseline (configurable)
+baseline = os.getenv("BASELINE_DETECTOR", "yolo")  # Env var for flexibility
+for metric in pivot_metrics:
+    for det in [d for d in multi_df.columns.levels[1] if d != baseline]:
+        multi_df[(metric, f"diff_{det}")] = multi_df[(metric, det)] - multi_df[(metric, baseline)]
 
-stats = {
-    "mean_conf_diff": pairs_df["conf_diff"].mean(),
-    "std_conf_diff": pairs_df["conf_diff"].std(),
-    "mean_dets_diff": pairs_df["dets_diff"].mean(),
-    "std_dets_diff": pairs_df["dets_diff"].std(),
-    "mean_time_diff": pairs_df["time_diff"].mean(),
-    "std_time_diff": pairs_df["time_diff"].std(),
-    "vit_more_dets_pct": (pairs_df["dets_diff"] > 0).mean() * 100,
-    "vit_higher_conf_pct": (pairs_df["conf_diff"] > 0).mean() * 100,
-}
+# Aggregates (means/std across all, plus pairwise)
+stats = {}
+for metric in pivot_metrics:
+    stats[f"mean_{metric}"] = multi_df[metric].mean(axis=1).mean()  # Overall mean
+    stats[f"std_{metric}"] = multi_df[metric].std(axis=1).mean()   # Avg variation
+    for det in multi_df[metric].columns:
+        stats[f"mean_{metric}_{det}"] = multi_df[(metric, det)].mean()
 
-# Generate charts as buffers
-def fig_to_buf(fig):
-    buf = BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    return buf
+# Add pairwise superiority % (e.g., % events where vit > yolo)
+for metric in ["num_detections", "top_confidence"]:
+    for det in [d for d in multi_df[metric].columns if d != baseline]:
+        stats[f"{det}_higher_{metric}_pct"] = (multi_df[(metric, det)] > multi_df[(metric, baseline)]).mean() * 100
 
-# Scatter detections
-fig1, ax1 = plt.subplots(figsize=(8,6))
-sns.scatterplot(data=pairs_df, x="yolo_dets", y="vit_dets")
-ax1.plot([0, pairs_df[["yolo_dets","vit_dets"]].max().max()], [0, pairs_df[["yolo_dets","vit_dets"]].max().max()], 'r--')
-ax1.set_title(f"Num Detections: YOLO vs ViT (n={len(pairs_df)})")
-scatter_buf = fig_to_buf(fig1)
-plt.close(fig1)
-
-# Hist conf diff
-fig2, ax2 = plt.subplots(figsize=(8,6))
-sns.histplot(pairs_df["conf_diff"], kde=True)
-ax2.axvline(stats["mean_conf_diff"], color='r', linestyle='--')
-ax2.set_title("Top Confidence Diff (ViT - YOLO)")
-hist_buf = fig_to_buf(fig2)
-plt.close(fig2)
-
-# Boxplot conf
-conf_df = pd.melt(pairs_df[["yolo_conf", "vit_conf"]], var_name="Detector", value_name="Top Confidence")
-conf_df["Detector"] = conf_df["Detector"].str.replace("_conf", "").str.upper()
-fig3, ax3 = plt.subplots(figsize=(8,6))
-sns.boxplot(data=conf_df, x="Detector", y="Top Confidence")
-ax3.set_title("Top Confidence Distribution")
-box_buf = fig_to_buf(fig3)
-plt.close(fig3)
-
-# Use a temporary directory to save charts as real files
+# Charts: Adapt to multi-detector
 with tempfile.TemporaryDirectory() as tmpdir:
-    scatter_path = os.path.join(tmpdir, "scatter_detections.png")
-    hist_path = os.path.join(tmpdir, "hist_conf_diff.png")
-    box_path = os.path.join(tmpdir, "boxplot_conf.png")
+    # Boxplot for each metric (side-by-side for all detectors)
+    for metric in pivot_metrics:
+        melt_df = pd.melt(multi_df[metric].reset_index(), id_vars="run_name", var_name="Detector", value_name=metric.capitalize())
+        fig, ax = plt.subplots(figsize=(10,6))
+        sns.boxplot(data=melt_df, x="Detector", y=metric.capitalize())
+        ax.set_title(f"{metric.capitalize()} Distribution Across Detectors (n={len(multi_df)} events)")
+        box_path = os.path.join(tmpdir, f"boxplot_{metric}.png")
+        fig.savefig(box_path, bbox_inches='tight')
+        plt.close(fig)
 
-    fig1.savefig(scatter_path, bbox_inches='tight', dpi=150)
-    plt.close(fig1)
+    # Scatter: Pairwise (loop over pairs, but limit to key ones like baseline vs each)
+    for det in [d for d in multi_df["num_detections"].columns if d != baseline]:
+        fig, ax = plt.subplots(figsize=(8,6))
+        sns.scatterplot(x=multi_df[("num_detections", baseline)], y=multi_df[("num_detections", det)])
+        ax.plot([0, multi_df["num_detections"].max().max()], [0, multi_df["num_detections"].max().max()], 'r--')
+        ax.set_title(f"Num Detections: {baseline.upper()} vs {det.upper()}")
+        scatter_path = os.path.join(tmpdir, f"scatter_dets_{baseline}_vs_{det}.png")
+        fig.savefig(scatter_path, bbox_inches='tight')
+        plt.close(fig)
 
-    fig2.savefig(hist_path, bbox_inches='tight', dpi=150)
-    plt.close(fig2)
+    # Similar for hist diffs (per pair)
+    # ... (add as needed)
+# Hist conf diff
+#fig2, ax2 = plt.subplots(figsize=(8,6))
+#sns.histplot(pairs_df["conf_diff"], kde=True)
+#ax2.axvline(stats["mean_conf_diff"], color='r', linestyle='--')
+#ax2.set_title("Top Confidence Diff (ViT - YOLO)")
+#hist_buf = fig_to_buf(fig2)
+#plt.close(fig2)
+#
+## Boxplot conf
+#conf_df = pd.melt(pairs_df[["yolo_conf", "vit_conf"]], var_name="Detector", value_name="Top Confidence")
+#conf_df["Detector"] = conf_df["Detector"].str.replace("_conf", "").str.upper()
+#fig3, ax3 = plt.subplots(figsize=(8,6))
+#sns.boxplot(data=conf_df, x="Detector", y="Top Confidence")
+#ax3.set_title("Top Confidence Distribution")
+#box_buf = fig_to_buf(fig3)
+#plt.close(fig3)
 
-    fig3.savefig(box_path, bbox_inches='tight', dpi=150)
-    plt.close(fig3)
-
-    # Now start the MLflow run and log everything
+    # Log to summary run
     summary_name = f"summary-{datetime.now().strftime('%Y-%m-%d-%H%M')}"
     with mlflow.start_run(experiment_id=exp_id, run_name=summary_name) as run:
-        mlflow.log_param("num_pairs", len(pairs_df))
-        mlflow.log_param("summary_date", datetime.now().isoformat())
+        mlflow.log_param("num_events", len(multi_df))
+        mlflow.log_param("detectors_included", ",".join(set(df["detector"])))
+        mlflow.log_param("baseline_detector", baseline)
 
         for k, v in stats.items():
-            if v is not None and not pd.isna(v):  # Extra guard against NaN
+            if pd.notna(v):
                 mlflow.log_metric(k, float(v))
 
-        # Fixed: Pass DataFrames directly
-        mlflow.log_table(pairs_df, "pairs_summary.json")
-        mlflow.log_table(pairs_df.describe(), "aggregate_stats.json")
+        mlflow.log_table(multi_df.reset_index(), "multi_summary.json")
+        mlflow.log_table(multi_df.describe(), "aggregate_stats.json")
 
-        # Artifacts (unchanged)
-        mlflow.log_artifact(scatter_path)
-        mlflow.log_artifact(hist_path)
-        mlflow.log_artifact(box_path)
-
-        print(f"Logged summary run '{summary_name}' with {len(pairs_df)} pairs and 3 charts.")
+        # Log all generated charts
+        for chart_file in os.listdir(tmpdir):
+            mlflow.log_artifact(os.path.join(tmpdir, chart_file))
+        
+        print(f"Logged summary run '{summary_name}' with {len(pairs_df)} pairs and [{len(os.listdir(tmpdir))}] charts.")
 
 print("Comparator run complete.")
