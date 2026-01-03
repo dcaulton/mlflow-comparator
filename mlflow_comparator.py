@@ -10,7 +10,7 @@ from io import BytesIO
 
 # Config
 MLFLOW_TRACKING_URI = "http://mlflow-service.mlflow.svc.cluster.local:5000"  # k8s internal
-EXPERIMENT_NAME = "exp-2026-yolo-vit"
+EXPERIMENT_NAME = "detection"
 
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
